@@ -196,7 +196,9 @@ function renderOverview(view) {
     return `<div class="tl-item ${r.is_major ? "major" : ""}">
       <div class="tl-date">${fmtDay(r.published_at || r.detected_at)} <span class="badge badge-source">${esc(SOURCE_LABELS[r.source_type] || r.source_type)}</span></div>
       <div class="tl-title"><a href="#/release/${r.id}">${esc(r.title)}</a></div>
-      <div class="tl-meta">${vendorBadge(r.vendor_key)} ${majorBadge(r.is_major)} ${progressBadge(r.progress)} ${metricChips(r.top_metrics, 3)}</div>
+      <div class="tl-meta">${vendorBadge(r.vendor_key)} ${majorBadge(r.is_major)} ${progressBadge(r.progress)}
+        ${r.composite_score != null ? `<span class="metric-chip" style="background:rgba(63,185,80,.12);color:var(--green)">综合 ${r.composite_score}</span>` : ""}
+        ${metricChips(r.top_metrics, 3)}</div>
       ${s}</div>`;
   }).join("");
   tl.innerHTML = items || '<div class="empty">暂无发布记录</div>';
@@ -285,6 +287,15 @@ function renderVendor(view, key) {
     </div>
 
     <div class="section">
+      <div class="section-title">公司档案与商业化 <span class="hint">公开报道数据，附来源链接</span></div>
+      <div class="grid grid-2">
+        <div class="card" id="vendor-fin"></div>
+        <div class="card"><h3>能力跃迁（综合分=披露基准均值）</h3><div id="chart-cap" class="chart-sm"></div>
+        ${v.pricing_trend && v.pricing_trend.length ? `<h3 style="margin-top:14px">模型定价趋势（$/M 输出）</h3><div id="chart-price" class="chart-sm"></div>` : ""}</div>
+      </div>
+    </div>
+
+    <div class="section">
       <div class="section-title">发布历史</div>
       <div class="card"><div class="timeline" id="vendor-tl"></div></div>
     </div>`;
@@ -361,6 +372,75 @@ function renderVendor(view, key) {
     document.getElementById("chart-radar").parentElement.innerHTML = '<div class="empty">暂无维度数据</div>';
   }
 
+  // 公司档案（财务公开数据）
+  const fins = v.financials || [];
+  const fmtVal = (m) => {
+    if (m.value == null) return esc(m.value_text || "—");
+    const abs = Math.abs(m.value);
+    if (abs >= 1e9) return "$" + (m.value / 1e9).toFixed(1) + "B";
+    if (abs >= 1e6) return "$" + (m.value / 1e6).toFixed(0) + "M";
+    return "$" + m.value.toFixed(0);
+  };
+  const METRIC_LABELS = { founded: "成立时间", arr_usd: "ARR（年化收入）", revenue_usd: "年度营收",
+    funding_usd: "融资额", valuation_usd: "估值", employees: "员工数", margin_notes: "毛利率" };
+  const finHtml = fins.length
+    ? `<table class="tbl"><tbody>${fins.map(f => `
+        <tr><td style="color:var(--text-dim);width:150px">${METRIC_LABELS[f.metric] || f.metric}</td>
+        <td><b class="mono">${fmtVal(f)}</b> <span class="mono" style="color:var(--text-dim);font-size:11.5px">${esc(f.period || "")}</span></td>
+        <td style="max-width:340px"><span style="font-size:12px;color:var(--text-dim)">${esc(f.note || "")}</span>
+        ${f.source_url ? `<a href="${esc(f.source_url)}" target="_blank" rel="noopener" style="font-size:11.5px">来源↗</a>` : ""}</td></tr>`).join("")}</tbody></table>`
+    : '<div class="metric-empty">暂无公开财务数据</div>';
+  document.getElementById("vendor-fin").innerHTML = `<h3>公司档案</h3>${finHtml}`;
+
+  // 能力跃迁图（综合分时间序列 + 大跃迁标注）
+  const cap = v.capability_series || [];
+  if (cap.length >= 2) {
+    let prevScore = null;
+    const jumps = [];
+    cap.forEach((c, i) => {
+      if (prevScore != null && c.score - prevScore >= 10) jumps.push({ coord: [c.date, c.score], name: c.title });
+      prevScore = c.score;
+    });
+    chart(document.getElementById("chart-cap"), {
+      tooltip: { ...tooltipBase(), trigger: "axis", formatter: ps => {
+        const p = ps[0]; const item = cap.find(c => c.date === p.axisValue);
+        return `${p.axisValue}<br><b>${p.marker}${esc(item ? item.title : "")}</b>: ${p.value}`;
+      } },
+      grid: { left: 40, right: 16, top: 16, bottom: 40 },
+      xAxis: { ...axisBase("time"), splitLine: { show: false } },
+      yAxis: { ...axisBase(), min: val => Math.max(0, Math.floor((val.min - 5) / 10) * 10) },
+      series: [{
+        type: "line", data: cap.map(c => [c.date, c.score]),
+        lineStyle: { width: 2.5, color: "#4f8cff" }, itemStyle: { color: "#4f8cff" },
+        symbolSize: 7,
+        markPoint: jumps.length ? { data: jumps.map(j => ({ ...j, value: j.coord[1] })),
+          symbol: "pin", symbolSize: 38,
+          label: { color: "#fff", fontSize: 9, formatter: "↑" },
+          itemStyle: { color: "#f0883e" } } : undefined,
+      }],
+    });
+  } else {
+    document.getElementById("chart-cap").parentElement.querySelector("h3").insertAdjacentHTML("afterend", '<div class="metric-empty">基准数据不足（深度解析后自动出现）</div>');
+  }
+
+  // 定价趋势
+  if (v.pricing_trend && v.pricing_trend.length) {
+    const pts = v.pricing_trend.filter(p => p.output_per_m != null);
+    if (pts.length) {
+      chart(document.getElementById("chart-price"), {
+        tooltip: { ...tooltipBase(), trigger: "axis" },
+        grid: { left: 48, right: 16, top: 16, bottom: 40 },
+        xAxis: { ...axisBase("time"), splitLine: { show: false } },
+        yAxis: { ...axisBase(), max: undefined, name: "$/M" },
+        series: [{
+          type: "line", data: pts.map(p => [p.effective_date, p.output_per_m]),
+          lineStyle: { width: 2, color: "#3fb950" }, itemStyle: { color: "#3fb950" },
+          symbolSize: 7, areaStyle: { opacity: .08 },
+        }],
+      });
+    }
+  }
+
   // 发布历史
   const rels = DATA.releases.filter(r => r.vendor_key === key);
   document.getElementById("vendor-tl").innerHTML = rels.map(r => `
@@ -371,7 +451,13 @@ function renderVendor(view, key) {
     </div>`).join("") || '<div class="empty">暂无发布记录</div>';
 }
 
-/* ---------- 发布详情 ---------- */
+/* ---------- 发布详情（tabs） ---------- */
+const SPEC_LABELS = {
+  params_billions: "总参数(B)", active_params_billions: "激活参数(B)",
+  architecture: "架构", num_experts: "专家数", context_window: "上下文长度",
+  max_output: "最大输出", modalities: "模态", weights: "权重", license: "许可证",
+};
+
 async function renderRelease(view, id) {
   const idx = DATA.releases.find(r => r.id === Number(id));
   if (!idx) { view.appendChild(el("div", "empty", "发布不存在")); return; }
@@ -384,13 +470,6 @@ async function renderRelease(view, id) {
   const d = detailCache[id] || { ...idx, official_benchmarks: [], self_evals: [], related_papers: [] };
   const s = d.summary || null;
 
-  const benchRows = (d.official_benchmarks || []).map(b => `
-    <tr><td class="mono">${esc(b.benchmark)}</td><td class="mono" style="font-weight:700;color:var(--primary)">${b.value}</td>
-    <td>${b.source_url ? `<a href="${esc(b.source_url)}" target="_blank" rel="noopener">来源 ↗</a>` : "—"}</td></tr>`).join("");
-  const selfRows = (d.self_evals || []).map(e => `
-    <tr><td class="mono">${esc(e.benchmark)}</td><td class="mono" style="font-weight:700;color:var(--green)">${e.score.toFixed ? e.score.toFixed(2) : e.score}</td>
-    <td class="mono">${esc(e.metric)}</td><td class="mono">${e.num_samples}</td><td class="mono">${esc(e.model_version || "")}</td></tr>`).join("");
-
   const innovHtml = s && s.innovations && s.innovations.length
     ? `<div class="innov-grid">${s.innovations.map(i => `
         <div class="innov-card"><div class="dim">${esc(DIM_LABELS[i.dimension] || i.dimension)}</div>
@@ -401,53 +480,137 @@ async function renderRelease(view, id) {
     ? `<ul class="src-list">${s.source_urls.map(u => `<li><a href="${esc(u)}" target="_blank" rel="noopener">${esc(u)}</a></li>`).join("")}</ul>`
     : `<a href="${esc(d.url)}" target="_blank" rel="noopener">${esc(d.url)}</a>`;
 
+  const benchRows = (d.official_benchmarks || []).map(b => `
+    <tr><td class="mono">${esc(b.benchmark)}</td><td class="mono" style="font-weight:700;color:var(--primary)">${b.value}</td>
+    <td>${b.source_url ? `<a href="${esc(b.source_url)}" target="_blank" rel="noopener">来源 ↗</a>` : "—"}</td></tr>`).join("");
+  const selfRows = (d.self_evals || []).map(e => `
+    <tr><td class="mono">${esc(e.benchmark)}</td><td class="mono" style="font-weight:700;color:var(--green)">${e.score.toFixed ? e.score.toFixed(2) : e.score}</td>
+    <td class="mono">${esc(e.metric)}</td><td class="mono">${e.num_samples}</td><td class="mono">${esc(e.model_version || "")}</td></tr>`).join("");
+
+  // 规格
+  const specs = d.model_specs || null;
+  const specsHtml = specs
+    ? `<div class="tbl-wrap"><table class="tbl"><tbody>${Object.entries(SPEC_LABELS).map(([k, label]) => {
+        let val = specs[k];
+        if (val === null || val === undefined || val === "" || (Array.isArray(val) && !val.length)) return "";
+        if (Array.isArray(val)) val = val.join(" / ");
+        return `<tr><td style="color:var(--text-dim);width:180px">${label}</td><td class="mono">${esc(String(val))}</td></tr>`;
+      }).join("")}</tbody></table></div>`
+    : '<div class="metric-empty">暂无结构化规格（深度解析后自动出现）</div>';
+
+  // 训练
+  const tr = d.training || null;
+  const trList = arr => (arr && arr.length ? arr.map(x => `<li>${esc(x)}</li>`).join("") : "");
+  const trainingHtml = tr
+    ? `<div class="grid grid-2">
+        <div class="card"><h3>预训练</h3><ul class="src-list">${trList(tr.pretrain_innovations)}</ul>
+          ${tr.pretrain_tokens_trillions ? `<div style="margin-top:6px">预训练 token：<b class="mono">${esc(String(tr.pretrain_tokens_trillions))}T</b></div>` : ""}
+          ${tr.data_mix ? `<div style="margin-top:4px;color:var(--text-dim);font-size:12.5px">数据配比：${esc(tr.data_mix)}</div>` : ""}
+          ${tr.compute ? `<div style="margin-top:4px;color:var(--text-dim);font-size:12.5px">训练算力：${esc(tr.compute)}</div>` : ""}</div>
+        <div class="card"><h3>后训练</h3><ul class="src-list">${trList(tr.posttrain_innovations)}</ul>
+          ${tr.rl_methods && tr.rl_methods.length ? `<div style="margin-top:6px">RL 方法：${tr.rl_methods.map(m => `<span class="metric-chip">${esc(m)}</span>`).join(" ")}</div>` : ""}</div>
+      </div>`
+    : '<div class="empty">暂无训练细节（深度解析后自动出现）</div>';
+
+  // 定价 + 毛利
+  const pr = d.pricing || null;
+  const mg = d.margin || null;
+  const pricingHtml = pr && pr.has_pricing
+    ? `<div class="grid grid-2">
+        <div class="card"><h3>API 定价（$/M tokens）</h3>
+          <div class="kpi-grid3">
+            <div class="kpi"><div class="num">${pr.input_per_m ?? "—"}</div><div class="label">输入</div></div>
+            <div class="kpi"><div class="num">${pr.output_per_m ?? "—"}</div><div class="label">输出</div></div>
+            <div class="kpi"><div class="num">${pr.cached_in_per_m ?? "—"}</div><div class="label">缓存输入</div></div>
+          </div></div>
+        ${mg ? `<div class="card"><h3>推理毛利率估算 <span class="badge badge-ai">估算</span></h3>
+          <div style="font-size:24px;font-weight:800;font-family:var(--mono)">${mg.margin_low_pct}% ~ ${mg.margin_high_pct}%</div>
+          <div style="color:var(--text-dim);font-size:12px;margin-top:4px">单 M 输出 token 推理成本约 $${mg.cost_low_usd_per_m} ~ $${mg.cost_high_usd_per_m}（按定价 $${pr.output_per_m} 测算）</div>
+          <details style="margin-top:8px"><summary style="cursor:pointer;color:var(--text-dim);font-size:12px">查看假设</summary>
+            <div class="mono" style="font-size:11.5px;margin-top:6px;color:var(--text-dim)">GPU ${esc(mg.assumptions.gpu)}（$ ${mg.assumptions.gpu_price_usd}）· MFU ${mg.assumptions.mfu_range[0]}-${mg.assumptions.mfu_range[1]} · 利用率 ${mg.assumptions.utilization} · 折旧 ${mg.assumptions.depreciation_years} 年 · 电费 $${mg.assumptions.electricity_usd_per_kwh}/kWh · 激活参数 ${mg.assumptions.active_params_billions}B</div></details></div>` : ""}
+      </div>`
+    : '<div class="empty">暂无定价信息</div>';
+
+  // 装配来源审计
+  const cs = d.content_sources || null;
+  const csHtml = cs && cs.length
+    ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>内容块</th><th>来源</th><th>字符数</th></tr></thead><tbody>
+        ${cs.map(c => `<tr><td class="mono">${esc(c.kind)}</td><td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.source)}</td><td class="mono">${c.chars}</td></tr>`).join("")}</tbody></table></div>`
+    : "";
+
   view.innerHTML = `
     <div style="margin-bottom:14px"><a href="#/models">← 模型库</a>${d.vendor_key ? ` · ${vendorBadge(d.vendor_key)}` : ""}</div>
     <div class="page-title">${esc(d.title)}</div>
     <div class="page-sub">
       ${fmtDate(d.published_at || d.detected_at)} · <span class="badge badge-source">${esc(SOURCE_LABELS[d.source_type] || d.source_type)}</span>
       ${majorBadge(d.is_major)} ${progressBadge(s && s.progress_magnitude)}
+      ${d.deep_analyzed ? '<span class="badge badge-ai">深度解析</span>' : ""}
     </div>
 
-    <div class="section grid grid-2">
-      <div class="card">
-        <h3>概述 ${s ? `<span class="badge badge-ai">AI 生成 · ${esc(s.generated_by || "LLM")} · ${fmtDay(s.generated_at)}</span>` : ""}</h3>
-        <div style="color:var(--text)">${esc(s ? s.summary_zh : (idx.summary_zh || "暂无概述"))}</div>
-        ${s && s.progress_note ? `<div style="margin-top:8px;color:var(--text-dim);font-size:12.5px">进步幅度依据：${esc(s.progress_note)}</div>` : ""}
-        ${s && s.predecessor ? `<div style="margin-top:4px;color:var(--text-dim);font-size:12.5px">前代版本：${esc(s.predecessor)}</div>` : ""}
+    <div class="tabs" id="rel-tabs">
+      <button class="tab active" data-tab="overview">概述</button>
+      <button class="tab" data-tab="specs">规格与架构</button>
+      <button class="tab" data-tab="training">训练细节</button>
+      <button class="tab" data-tab="bench">评测指标</button>
+      <button class="tab" data-tab="pricing">定价与商业化</button>
+    </div>
+
+    <div id="tab-overview" class="tab-pane">
+      <div class="section grid grid-2">
+        <div class="card">
+          <h3>概述 ${s ? `<span class="badge badge-ai">AI 生成 · ${esc(s.generated_by || "LLM")} · ${fmtDay(s.generated_at)}</span>` : ""}</h3>
+          <div style="color:var(--text)">${esc(s ? s.summary_zh : (idx.summary_zh || "暂无概述"))}</div>
+          ${s && s.progress_note ? `<div style="margin-top:8px;color:var(--text-dim);font-size:12.5px">进步幅度依据：${esc(s.progress_note)}</div>` : ""}
+          ${s && s.predecessor ? `<div style="margin-top:4px;color:var(--text-dim);font-size:12.5px">前代版本：${esc(s.predecessor)}</div>` : ""}
+        </div>
+        <div class="card"><h3>来源链接</h3>${srcHtml}</div>
       </div>
-      <div class="card">
-        <h3>来源链接</h3>
-        ${srcHtml}
+      <div class="section"><div class="section-title">技术总结 · 创新点</div>${innovHtml}</div>
+      ${d.related_papers && d.related_papers.length ? `
+      <div class="section"><div class="section-title">关联论文</div>
+        <div class="card"><ul class="src-list">${d.related_papers.map(p => `<li><a href="${esc(p.arxiv_url)}" target="_blank" rel="noopener">${esc(p.title)}</a></li>`).join("")}</ul></div>
+      </div>` : ""}
+    </div>
+
+    <div id="tab-specs" class="tab-pane" style="display:none">
+      <div class="section"><div class="section-title">模型规格</div><div class="card">${specsHtml}</div></div>
+      ${csHtml ? `<div class="section"><div class="section-title">解析内容来源（审计）</div><div class="card">${csHtml}</div></div>` : ""}
+    </div>
+
+    <div id="tab-training" class="tab-pane" style="display:none">
+      <div class="section">${trainingHtml}</div>
+    </div>
+
+    <div id="tab-bench" class="tab-pane" style="display:none">
+      <div class="section grid grid-2">
+        <div class="card">
+          <h3>官方披露指标 <span class="hint" style="font-weight:400;font-size:12px">全部 ${(d.official_benchmarks || []).length} 项</span></h3>
+          ${benchRows ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>基准</th><th>分数</th><th>来源</th></tr></thead><tbody>${benchRows}</tbody></table></div>` : '<div class="metric-empty">暂无官方指标</div>'}
+        </div>
+        <div class="card">
+          <h3>自测结果 <span class="hint" style="font-weight:400;font-size:12px">ame 评测系统实跑</span></h3>
+          ${selfRows ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>基准</th><th>分数</th><th>指标</th><th>样本</th><th>模型</th></tr></thead><tbody>${selfRows}</tbody></table></div>` : '<div class="metric-empty">暂无自测结果</div>'}
+        </div>
       </div>
     </div>
 
-    <div class="section">
-      <div class="section-title">技术总结 · 创新点</div>
-      ${innovHtml}
-    </div>
+    <div id="tab-pricing" class="tab-pane" style="display:none">
+      <div class="section">${pricingHtml}</div>
+    </div>`;
 
-    <div class="section grid grid-2">
-      <div class="card">
-        <h3>官方披露指标</h3>
-        ${benchRows ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>基准</th><th>分数</th><th>来源</th></tr></thead><tbody>${benchRows}</tbody></table></div>` : '<div class="metric-empty">暂无官方指标</div>'}
-      </div>
-      <div class="card">
-        <h3>自测结果 <span class="hint" style="font-weight:400;font-size:12px">ame 评测系统实跑</span></h3>
-        ${selfRows ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>基准</th><th>分数</th><th>指标</th><th>样本</th><th>模型</th></tr></thead><tbody>${selfRows}</tbody></table></div>` : '<div class="metric-empty">暂无自测结果</div>'}
-      </div>
-    </div>
-
-    ${d.related_papers && d.related_papers.length ? `
-    <div class="section"><div class="section-title">关联论文</div>
-      <div class="card"><ul class="src-list">${d.related_papers.map(p => `<li><a href="${esc(p.arxiv_url)}" target="_blank" rel="noopener">${esc(p.title)}</a></li>`).join("")}</ul></div>
-    </div>` : ""}`;
+  view.querySelectorAll(".tab").forEach(btn => btn.onclick = () => {
+    view.querySelectorAll(".tab").forEach(b => b.classList.toggle("active", b === btn));
+    view.querySelectorAll(".tab-pane").forEach(p => p.style.display = "none");
+    document.getElementById("tab-" + btn.dataset.tab).style.display = "block";
+  });
 }
 
 /* ---------- 对比页 ---------- */
 function renderCompare(view, params) {
   const ids = ["a", "b", "c", "d", "e"].map(k => Number(params.get(k))).filter(Boolean).slice(0, 5);
   const sel = DATA.releases.map(r => r);
+  const presetChips = (DATA.presets || []).map(p =>
+    `<a class="vendor-chip" href="#/compare?${p.release_ids.map((v, i) => "abcde"[i] + "=" + v).join("&")}" style="cursor:pointer">${esc(p.label)}</a>`).join("");
   view.innerHTML = `
     <div class="page-title">模型对比</div>
     <div class="page-sub">选择 2–5 个发布 · 对比官方基准分与能力画像 · 链接可分享</div>
@@ -457,6 +620,8 @@ function renderCompare(view, params) {
       <button class="vendor-chip" id="c-btn" style="cursor:pointer">＋ 添加</button>
       <span style="color:var(--text-dim);font-size:12.5px">已选 ${ids.length}/5</span>
     </div>
+    ${presetChips ? `<div style="margin-bottom:10px;display:flex;flex-wrap:wrap;gap:6px;align-items:center">
+      <span style="color:var(--text-dim);font-size:12.5px">同代对比：</span>${presetChips}</div>` : ""}
     <div id="c-chips" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px"></div>
     <div id="c-body"></div>`;
 
@@ -543,16 +708,20 @@ function renderCompare(view, params) {
       series: [{ type: "radar", data: radarData }],
     });
 
-    // 明细表：行=benchmark，列=各模型 + 相对前代 delta
+    // 明细表：行=benchmark，列=各模型；每行最高分标 SOTA
     const rows = bms.map(bm => {
       const cells = loaded.map(d => {
         const f = (d.official_benchmarks || []).find(b => b.benchmark === bm);
-        return f ? `<b class="mono">${f.value}</b>` : "—";
+        return f ? f.value : null;
       });
-      return { bm, cells };
+      const best = Math.max(...cells.filter(v => v != null));
+      return { bm, cells, best };
     });
-    const header = `<thead><tr><th>基准</th>${loaded.map(d => `<th>${esc(d.title.length > 14 ? d.title.slice(0, 14) + "…" : d.title)}</th>`).join("")}</tr></thead>`;
-    const body = rows.map(r => `<tr><td class="mono">${esc(r.bm)}</td>${r.cells.map(c => `<td>${c}</td>`).join("")}</tr>`).join("");
+    const header = `<thead><tr><th>基准</th>${loaded.map(d => `<th>${esc(d.title.length > 14 ? d.title.slice(0, 14) + "…" : d.title)}</th>`).join("")}<th>对比组 SOTA</th></tr></thead>`;
+    const body = rows.map(r => `<tr><td class="mono">${esc(r.bm)}</td>${r.cells.map(c => {
+      const isBest = c != null && c === r.best;
+      return `<td>${c != null ? `<b class="mono" style="color:${isBest ? "var(--green)" : "var(--text)"}">${c}</b>${isBest ? ' <span class="badge badge-progress-minor">SOTA</span>' : ""}` : "—"}</td>`;
+    }).join("")}<td class="mono" style="color:var(--green)">${r.best}</td></tr>`).join("");
     document.getElementById("c-tbl").innerHTML = header + `<tbody>${body}</tbody>`;
   });
   chips();
@@ -623,19 +792,50 @@ function renderPapers(view) {
 }
 
 /* ---------- 启动 ---------- */
+function renderSearchResults(q) {
+  const drop = document.getElementById("search-drop");
+  if (!q || q.length < 2) { drop.style.display = "none"; return; }
+  const kw = q.toLowerCase();
+  const vm = vendorMap();
+  const models = DATA.releases.filter(r => r.title.toLowerCase().includes(kw)).slice(0, 6);
+  const vendors = DATA.vendors.filter(v => (v.name + " " + (v.name_zh || "")).toLowerCase().includes(kw)).slice(0, 4);
+  const papers = DATA.papers.filter(p => p.title.toLowerCase().includes(kw)).slice(0, 4);
+  const items = [
+    ...vendors.map(v => ({ label: `🏢 ${v.name_zh || v.name}`, href: `#/vendor/${v.key}` })),
+    ...models.map(r => ({ label: `📦 ${r.title}`, href: `#/release/${r.id}` })),
+    ...papers.map(p => ({ label: `📄 ${p.title.slice(0, 60)}`, href: p.arxiv_url, ext: true })),
+  ];
+  drop.innerHTML = items.length
+    ? items.map(i => `<a href="${esc(i.href)}" ${i.ext ? 'target="_blank" rel="noopener"' : ""}>${esc(i.label)}</a>`).join("")
+    : '<div class="drop-empty">无匹配结果</div>';
+  drop.style.display = "block";
+}
+
 async function boot() {
-  const [meta, vendors, releases, history, products, papers] = await Promise.all([
+  const [meta, vendors, releases, history, products, papers, presets] = await Promise.all([
     fetch("data/meta.json").then(r => r.json()),
     fetch("data/vendors.json").then(r => r.json()),
     fetch("data/releases_index.json").then(r => r.json()),
     fetch("data/benchmark_history.json").then(r => r.json()),
     fetch("data/products.json").then(r => r.json()),
     fetch("data/papers.json").then(r => r.json()),
+    fetch("data/generation_presets.json").then(r => r.json()).catch(() => []),
   ]);
-  Object.assign(DATA, { meta, vendors, releases, history, products, papers });
+  Object.assign(DATA, { meta, vendors, releases, history, products, papers, presets });
   document.getElementById("brand-title").textContent = meta.brand.title;
   document.title = meta.brand.title;
   document.getElementById("foot-updated").textContent = `数据更新于 ${timeAgo(meta.generated_at)}`;
+  const search = document.getElementById("global-search");
+  search.addEventListener("input", () => renderSearchResults(search.value));
+  search.addEventListener("keydown", e => {
+    if (e.key === "Enter") {
+      const first = document.querySelector("#search-drop a");
+      if (first) { first.click(); document.getElementById("search-drop").style.display = "none"; }
+    }
+  });
+  document.addEventListener("click", e => {
+    if (!e.target.closest(".search-box")) document.getElementById("search-drop").style.display = "none";
+  });
   window.addEventListener("hashchange", render);
   window.addEventListener("resize", () => charts.forEach(c => c.resize()));
   render();
